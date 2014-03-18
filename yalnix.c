@@ -1,7 +1,7 @@
 #include <yalnix.h>
 #include <hardware.h>
 #include <stdio.h>
-// add a comment
+// delete a commit
 
 int fPF = MEM_INVALID_SIZE/PAGESIZE + 1;
 int nPF = MEM_INVALID_SIZE/PAGESIZE + 1;
