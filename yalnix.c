@@ -339,10 +339,6 @@ void TrapKernel(ExceptionStackFrame *frame)
 
 }
 
-void TrapClock(ExceptionStackFrame *frame)
-{
-}
-
 void TrapIllegal(ExceptionStackFrame *frame)
 {
 }
