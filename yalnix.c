@@ -10,11 +10,11 @@ int fPF = MEM_INVALID_SIZE/PAGESIZE + 1;
 int nPF = MEM_INVALID_SIZE/PAGESIZE + 1;
 int numOfFPF = 1;
 int pid_count = 0;
-/*
+
 // to track the kernel brk
 void *kernel_brk;
 int VM_flag = 0;
-*/
+
 
 struct pte initPT[PAGE_TABLE_LEN];
 struct pte PTR1[PAGE_TABLE_LEN];
@@ -39,14 +39,12 @@ typedef struct node
 {
     struct pcb *element;
     struct node *pre, *next;
-}Node, *NodePtr;
+}Node, NodePtr;
 
-NodePtr ready_queue_head = (NodePtr)malloc(sizeof(Node))   ;
-NodePtr delay_block_queue_head = (NodePtr)malloc(sizeof(Node));
-NodePtr ready_queue_rear = (NodePtr)malloc(sizeof(Node));
-NodePtr delay_block_queue_rear = (NodePtr)malloc(sizeof(Node));
-
-
+NodePtr *ready_queue_head;
+NodePtr *delay_block_queue_head;
+NodePtr *ready_queue_rear; 
+NodePtr *delay_block_queue_rear; 
 
 void TrapKernel(ExceptionStackFrame *frame);
 void TrapClock(ExceptionStackFrame *frame);
@@ -64,8 +62,11 @@ void KernelStart (ExceptionStackFrame *frame, unsigned int pmem_size,
     int i;
     // record kernel brk
     // and need to modify all orig_brk below to kernel_brk
-    *kernel_brk = *orig_brk;
-    
+    kernel_brk = orig_brk;
+    ready_queue_head = (NodePtr *)malloc(sizeof(Node));
+    delay_block_queue_head = (NodePtr *)malloc(sizeof(Node));
+    ready_queue_rear = (NodePtr *)malloc(sizeof(Node));
+    delay_block_queue_rear = (NodePtr *)malloc(sizeof(Node));
     // initialize ready queue and delay block queue
     ready_queue_head->pre = NULL;
     ready_queue_head->next = ready_queue_rear;
@@ -301,7 +302,7 @@ SavedContext *KernalCopySwitch(SavedContext *ctxp, void *p1, void *p2) {
 int SetKernelBrk(void *addr)
 {
     // if VM not enabled, just move kernel_brk to addr
-    if (VM_flag == 0) *kernel_brk = *addr;
+    if (VM_flag == 0) kernel_brk = addr;
     else
     {
     // first allocate free memory of size *addr - *kernel_brk from list of free
@@ -309,8 +310,9 @@ int SetKernelBrk(void *addr)
     // second map these new free phisical memory to page_table_1
     // then grow kernel_brk to addr frame by frame
         
-        int frameNeeded = (*addr - *kernel_brk)/PAGESIZE;
-        for (int i = 0; i < frameNeeded; i++)
+        int frameNeeded = (*(unsigned long*)addr - *(unsigned long*)kernel_brk)/PAGESIZE;
+        int i;
+	for (i = 0; i < frameNeeded; i++)
         {
             // if run out of phsical memory, return error
             if (numOfFPF == 0) return -1;
@@ -318,17 +320,15 @@ int SetKernelBrk(void *addr)
             int freeFrame = fPF;
             
             // move the head of linked list of free memory to next node
-            int *tmp;
-            tmp = &(fPF * PAGESIZE);
-            fPF = *tmp;
+            fPF = *(int *)(long)(fPF*PAGESIZE);
             numOfFPF--;
             
-            PTR1[*kernel_brk/PAGESIZE].uprot = PROT_NONE;
-            PTR1[*kernel_brk/PAGESIZE].kprot = (PROT_READ|PROT_WRITE|0);
-            PTR1[*kernel_brk/PAGESIZE].valid = 1;
-            PTR1[*kernel_brk/PAGESIZE].pfn = freeFrame;
+            PTR1[(*(unsigned long*)kernel_brk)/PAGESIZE].uprot = PROT_NONE;
+            PTR1[(*(unsigned long*)kernel_brk)/PAGESIZE].kprot = (PROT_READ|PROT_WRITE|0);
+            PTR1[(*(unsigned long*)kernel_brk)/PAGESIZE].valid = 1;
+            PTR1[(*(unsigned long*)kernel_brk)/PAGESIZE].pfn = freeFrame;
             
-            *kernel_brk += PAGESIZE;
+            *(unsigned long*)kernel_brk += PAGESIZE;
         }
     }
     return 0;
@@ -364,9 +364,9 @@ int Brk(void *addr)
 {
     int tmp;
     // invalid address, return 0
-    if ( *addr < VMEM_1_BASE || *addr > VMEM_LIMIT) return 0;
+    if ( *(unsigned long*)addr < VMEM_1_BASE || *(unsigned long*)addr > VMEM_LIMIT) return 0;
     // if addr already in under kernel brk, return 0
-    if (*addr <= *kernel_brk) return 0;
+    if (*(unsigned long*)addr <= *(unsigned long*)kernel_brk) return 0;
     else {
         tmp = SetKernelBrk( addr); // correct?
         return tmp;
@@ -390,25 +390,26 @@ int Delay(int clock_ticks)
     // try to find the right place to place current process in block queue
     int tmp = 0;
     int flag = 0;
-    NodePtr tmpNode;
-    NodePtr p = delay_block_queue_head;
+    NodePtr *tmpNode;
+    NodePtr *p;
+    p = delay_block_queue_head;
     while ( p->next != delay_block_queue_rear)
     {
         p = p->next;
-        tmp += (p.element) ->delayTime;
+        tmp += ((*p).element) ->delayTime;
         if (tmp > clock_ticks)
         {
-            tmp -= (p.element) ->delayTime;
+            tmp -= ((*p).element) ->delayTime;
             flag = 1;
             break;
         }
     }
     if (p != delay_block_queue_head)
-        (p.element) ->delayTime = (p.element) ->delayTime - ( clock_ticks - tmp);
+        ((*p).element) ->delayTime = ((*p).element) ->delayTime - ( clock_ticks - tmp);
     
-    tmpNode = (NodePtr)malloc(sizeof(Node));
-    tmpNode.element = curPCB;
-    (tmpNode.element) ->delayTime = clock_ticks - tmp;
+    tmpNode = (NodePtr *)malloc(sizeof(Node));
+    (*tmpNode).element = curPCB;
+    ((*tmpNode).element) ->delayTime = clock_ticks - tmp;
     if (p == delay_block_queue_head)
     {
         tmpNode ->next = p ->next;
@@ -432,26 +433,28 @@ int Delay(int clock_ticks)
     }
     
     // context switch current process to the head of ready queue, if null, switch to idle
-    NodePtr nextReady = ready_queue_head ->next;
+    NodePtr *nextReady;
+    nextReady = ready_queue_head ->next;
 
     if ( nextReady != ready_queue_rear)
     {
         ready_queue_head ->next = nextReady ->next;
         nextReady ->next->pre = ready_queue_head;
-        ContextSwitch(KernalCopySwitch, &curPCB ->ctx, curPCB, nextReady.element);
+        ContextSwitch(KernalCopySwitch, curPCB ->ctx, curPCB, (*nextReady).element);
         free(nextReady);
     }
     else
-        ContextSwitch(KernalCopySwitch, &curPCB ->ctx, curPCB, idle_pcb);
+        ContextSwitch(KernalCopySwitch, curPCB ->ctx, curPCB, idle_pcb);
 }
                 
 void TrapClock(ExceptionStackFrame *frame)
 {
     // count down delay, if equals to zero, take this blocked process out from
     // the block queue and put to ready queue
-    NodePtr p = delay_block_queue_head->next;
-    if (p != delay_block_queue_rear) (p.element) ->delayTime--;
-    while ((p.element) ->delayTime == 0 && p != delay_block_queue_rear)
+    NodePtr *p;
+    p = delay_block_queue_head->next;
+    if (p != delay_block_queue_rear) ((*p).element)->delayTime--;
+    while (((*p).element) ->delayTime == 0 && p != delay_block_queue_rear)
     {
         delay_block_queue_head ->next = p->next;
         p->next->pre = delay_block_queue_head;
