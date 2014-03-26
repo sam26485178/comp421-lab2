@@ -520,7 +520,7 @@ void TrapClock(ExceptionStackFrame *frame)
 int fork(void)
 {
     struct pcb *childPCB;
-    childPCB= (pcb *)malloc(sizeof(pcb));
+    childPCB= (struct pcb *)malloc(sizeof(struct pcb));
     
     struct pte childPT[PAGE_TABLE_LEN];
     childPCB->peerProcess = NULL;
