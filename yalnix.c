@@ -358,6 +358,7 @@ int SetKernelBrk(void *addr)
 int Brk(void *addr)
 {
     // invalid address, return 0
+    // BTW , can it be less than MEM_INVALID_SIZE?
     if (*(unsigned long*)addr < MEM_INVALID_SIZE || *(unsigned long*)addr > USER_STACK_LIMIT) return -1;
     
     int i;
@@ -518,17 +519,96 @@ void TrapClock(ExceptionStackFrame *frame)
  
 int fork(void)
 {
-    struct pcb *childPCB
+    struct pcb *childPCB;
     childPCB= (pcb *)malloc(sizeof(pcb));
     
-    struct pte child[PAGE_TABLE_LEN];
-    
+    struct pte childPT[PAGE_TABLE_LEN];
+    childPCB->peerProcess = NULL;
+    childPCB->childProcess = NULL;
     childPCB->pid = pid_count;
     pid_count++;
-    childPCB->ctx = curPCB->ctx;
+    *(childPCB->ctx) = *(curPCB->ctx);
+    *(unsigned long*)childPCB->brk = *(unsigned long*)curPCB->brk;
+    *(childPCB->myFrame) = *(curPCB->myFrame);
+    childPCB->PTR0 = childPT;
+
+    // try to make use of the red zone of curPCB to copy parent's kernelstack 
+    // to child's pagetable
+    curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].uprot = PROT_NONE;
+    curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].kprot = (PROT_READ|PROT_WRITE|0);
+    curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].valid = 1;
     
-    
-    
+    int i;
+    int tmp;
+
+    // copy parent's kernel_stack to child
+    for (i = 1; i <= KERNEL_STACK_PAGES; i++)
+    {
+        // first allocate a free frame to child pagetable
+        // then give the same pfn to red zone, copy the kernel_stack frame by 
+        // frame
+        if (numOfFPF == 0) return -1;
+        tmp = fPF;
+        curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].pfn = tmp;
+        // move the head of free frame linked list to next frame
+        fPF = *(int *)(long)USER_STACK_LIMIT;
+        numOfFPF--;
+        childPCB->PTR0[PAGE_TABLE_LEN-i].uprot = PROT_NONE;
+        childPCB->PTR0[PAGE_TABLE_LEN-i].kprot = (PROT_READ|PROT_WRITE|0);
+        childPCB->PTR0[PAGE_TABLE_LEN-i].valid = 1;
+        childPCB->PTR0[PAGE_TABLE_LEN-i].pfn = tmp;
+        memcpy((void *)(unsigned long)(USER_STACK_LIMIT), (void *)(unsigned long)(KERNEL_STACK_LIMIT - i*PAGESIZE), PAGESIZE);
+    }
+
+    // try to copy parent's heap and stack to child
+    for (i = MEM_INVALID_SIZE/PAGESIZE; i < USER_STACK_LIMIT/PAGESIZE; i++)
+    {
+        // copy parent's pte to child's page table
+        childPCB->PTR0[i].uprot = curPCB->PTR0[i].uprot;
+        childPCB->PTR0[i].kprot = curPCB->PTR0[i].kprot;
+        childPCB->PTR0[i].valid = curPCB->PTR0[i].valid;
+
+        // if it's a valid frame, need to allocate free frame to child pte
+        // and make a copy of parent's memory
+        if (curPCB->PTR0[i].valid == 1)
+        {
+            if (numOfFPF == 0) return -1;
+            tmp = fPF;
+            curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].pfn = tmp;
+            // move the head of free frame linked list to next frame
+            fPF = *(int *)(long)USER_STACK_LIMIT;
+            numOfFPF--;
+            childPCB->PTR0[i].pfn = tmp;
+            memcpy((void *)(unsigned long)(USER_STACK_LIMIT), (void *)(unsigned long)(i*PAGESIZE), PAGESIZE);
+        }
+    }
+
+    // set red zone back to usual
+    curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].valid = 0;
+
+    // point curP as child's parent process
+    childPCB->parentProcess = curPCB;
+
+    // if parent process has no child process, point created process as 
+    // parent's child process, if there is child processes, then 
+    // add created process to the end of the peer process
+    if (curPCB->childProcess == NULL) curPCB->childProcess = childPCB;
+    else 
+    {
+        struct pcb *tPCB;
+        tPCB = curPCB->childProcess;
+        while (tPCB->peerProcess != NULL) tPCB = tPCB->peerProcess;
+        tPCB->peerProcess = childPCB;
+    }
+
+    // try to modify the return value of parent process and child process
+    // parent: child pid, child: 0
+    (curPCB->myFrame)->regs[0] = childPCB->pid;
+    (childPCB->myFrame)->regs[0] = 0;
+
+    // child process return
+    ContextSwitch(KernalCopySwitch,curPCB->ctx ,curPCB, childPCB);
+    return (curPCB->myFrame)->regs[0];
 }
                   
                   
