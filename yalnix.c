@@ -31,7 +31,7 @@ struct pcb {
     struct pcb *childProcess;
 
     //Physical address of region 0 pagetable
-    void *region0_addr;
+    struct pte *PTR0;
     ExceptionStackFrame *myFrame;
 }; 
 struct pcb *curPCB;
@@ -308,7 +308,7 @@ int SetKernelBrk(void *addr)
 {
     if (*(unsigned long*)addr < VMEM_1_BASE || *(unsigned long*)addr > VMEM_1_LIMIT) return -1;
     // if VM not enabled, just move kernel_brk to addr
-    if (VM_flag == 0) *kernel_brk = *addr;
+    if (VM_flag == 0) *(unsigned long*)kernel_brk = *(unsigned long*)addr;
     else
     {
     // first allocate free memory of size *addr - *kernel_brk from list of free
