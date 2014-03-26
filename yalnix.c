@@ -24,6 +24,11 @@ struct pcb {
     int pid;
     int delayTime; // use for delay kernel call
     SavedContext *ctx;
+    
+    void *brk;
+    struct pcb *parentProcess;
+    struct pcb *peerProcess;
+    struct pcb *childProcess;
 
     //Physical address of region 0 pagetable
     void *region0_addr;
@@ -301,39 +306,95 @@ SavedContext *KernalCopySwitch(SavedContext *ctxp, void *p1, void *p2) {
 
 int SetKernelBrk(void *addr)
 {
+    if (*(unsigned long*)addr < VMEM_1_BASE || *(unsigned long*)addr > VMEM_1_LIMIT) return -1;
     // if VM not enabled, just move kernel_brk to addr
-    if (VM_flag == 0) kernel_brk = addr;
+    if (VM_flag == 0) *kernel_brk = *addr;
     else
     {
     // first allocate free memory of size *addr - *kernel_brk from list of free
     // phisical memory
     // second map these new free phisical memory to page_table_1
     // then grow kernel_brk to addr frame by frame
-        
-        int frameNeeded = (*(unsigned long*)addr - *(unsigned long*)kernel_brk)/PAGESIZE;
         int i;
-	for (i = 0; i < frameNeeded; i++)
+        //need to allocate pages
+        if ( DOWN_TO_PAGE(*(unsigned long*)addr) >= *(unsigned long*)kernel_brk)
         {
-            // if run out of phsical memory, return error
+            for (i = 0; i < (DOWN_TO_PAGE(*(unsigned long*)addr) - *(unsigned long*)kernel_brk)/PAGESIZE; i++)
+            {
+                if (numOfFPF == 0) return -1;
+                
+                PTR1[(*(unsigned long*)kernel_brk-VMEM_1_BASE)/PAGESIZE].uprot = PROT_NONE;
+                PTR1[(*(unsigned long*)kernel_brk-VMEM_1_BASE)/PAGESIZE].kprot = (PROT_READ|PROT_WRITE|0);
+                PTR1[(*(unsigned long*)kernel_brk-VMEM_1_BASE)/PAGESIZE].valid = 1;
+                PTR1[(*(unsigned long*)kernel_brk-VMEM_1_BASE)/PAGESIZE].pfn = fPF;
+                fPF = *(int *)(*(unsigned long*)kernel_brk);
+                numOfFPF--;
+                *(unsigned long*)kernel_brk += PAGESIZE;
+            }
+        }
+        else // need to gather memory back to list of free memory
+        {
+            if(( *(unsigned long*)kernel_brk - DOWN_TO_PAGE(*(unsigned long*)addr))/PAGESIZE >=2)
+            {
+                for (i = 0; i < ( *(unsigned long*)kernel_brk - DOWN_TO_PAGE(*(unsigned long*)addr))/PAGESIZE -1;i++)
+                {
+                    int tmp = PTR1[(*(unsigned long*)kernel_brk-VMEM_1_BASE)/PAGESIZE-1].pfn;
+                    *(int *)(*(unsigned long*)kernel_brk - PAGESIZE) = -1;
+                    PTR1[(*(unsigned long*)kernel_brk-VMEM_1_BASE)/PAGESIZE-1].pfn = nPF;
+                    *(int *)(*(unsigned long*)kernel_brk - PAGESIZE) = tmp;
+                    nPF = tmp;
+                    numOfFPF++;
+                    PTR1[(*(unsigned long*)kernel_brk-VMEM_1_BASE)/PAGESIZE-1].valid = 0;
+                    *(unsigned long*)kernel_brk -= PAGESIZE;
+                }
+            }
+        }
+
+    }
+    return 0;
+}
+
+// need to modify
+int Brk(void *addr)
+{
+    // invalid address, return 0
+    if (*(unsigned long*)addr < MEM_INVALID_SIZE || *(unsigned long*)addr > USER_STACK_LIMIT) return -1;
+    
+    int i;
+    if ( DOWN_TO_PAGE(*(unsigned long*)addr) >= *(unsigned long*)curPCB->brk) // need to allocate frame
+    {
+        for (i = 0; i < (DOWN_TO_PAGE(*(unsigned long*)addr) - *(unsigned long*)curPCB->brk); i++)
+        {
             if (numOfFPF == 0) return -1;
             
-            int freeFrame = fPF;
-            
-            // move the head of linked list of free memory to next node
-            fPF = *(int *)(long)(fPF*PAGESIZE);
+            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].uprot = PROT_NONE;
+            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].kprot = (PROT_READ|PROT_WRITE|0);
+            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].valid = 1;
+            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].pfn = fPF;
+            fPF = *(int *)(*(unsigned long*)curPCB->brk);
             numOfFPF--;
-            
-            PTR1[(*(unsigned long*)kernel_brk)/PAGESIZE].uprot = PROT_NONE;
-            PTR1[(*(unsigned long*)kernel_brk)/PAGESIZE].kprot = (PROT_READ|PROT_WRITE|0);
-            PTR1[(*(unsigned long*)kernel_brk)/PAGESIZE].valid = 1;
-            PTR1[(*(unsigned long*)kernel_brk)/PAGESIZE].pfn = freeFrame;
-            
-            *(unsigned long*)kernel_brk += PAGESIZE;
+            *(unsigned long*)curPCB->brk += PAGESIZE;
+        }
+    }
+    else
+    {
+        if ((*(unsigned long*)curPCB->brk - DOWN_TO_PAGE(*(unsigned long*)addr))/PAGESIZE >= 2)
+        {
+            for (i = 0; i < ( *(unsigned long*)curPCB->brk - DOWN_TO_PAGE(*(unsigned long*)addr))/PAGESIZE - 1; i++)
+            {
+                int tmp = curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE -1].pfn;
+                *(int *)(*(unsigned long*)curPCB->brk - PAGESIZE) = -1;
+                curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE-1].pfn = nPF;
+                *(int *)(*(unsigned long*)curPCB->brk - PAGESIZE) = tmp;
+                numOfFPF++;
+                curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE-1].valid = 0;
+                *(unsigned long*)curPCB->brk -= PAGESIZE;
+            }
         }
     }
     return 0;
 }
-                  
+
 void TrapKernel(ExceptionStackFrame *frame)
 {
 
@@ -360,20 +421,6 @@ void TrapTTYTransmit(ExceptionStackFrame *frame)
 {
 }
 
-int Brk(void *addr)
-{
-    int tmp;
-    // invalid address, return 0
-    if ( *(unsigned long*)addr < VMEM_1_BASE || *(unsigned long*)addr > VMEM_LIMIT) return 0;
-    // if addr already in under kernel brk, return 0
-    if (*(unsigned long*)addr <= *(unsigned long*)kernel_brk) return 0;
-    else {
-        tmp = SetKernelBrk( addr); // correct?
-        return tmp;
-    }
-    
-}
-                  
 int GetPid(void)
 {
     // every process context switch with idle process, so just return idle pid?
@@ -469,8 +516,20 @@ void TrapClock(ExceptionStackFrame *frame)
     }
 }
  
-                  
-                  
+int fork(void)
+{
+    struct pcb *childPCB
+    childPCB= (pcb *)malloc(sizeof(pcb));
+    
+    struct pte child[PAGE_TABLE_LEN];
+    
+    childPCB->pid = pid_count;
+    pid_count++;
+    childPCB->ctx = curPCB->ctx;
+    
+    
+    
+}
                   
                   
                   
