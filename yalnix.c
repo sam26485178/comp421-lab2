@@ -27,7 +27,7 @@ struct pcb {
     
     void *brk;
     struct pcb *parentProcess;
-    struct pcb *peerProcess;
+    struct pcb *siblingProcess;
     struct pcb *childProcess;
 
     //Physical address of region 0 pagetable
@@ -58,6 +58,11 @@ void TrapMemory(ExceptionStackFrame *frame);
 void TrapMath(ExceptionStackFrame *frame);
 void TrapTTYReceive(ExceptionStackFrame *frame);
 void TrapTTYTransmit(ExceptionStackFrame *frame);
+
+int YalnixGetPid(void);
+int YalnixDelay(int clock_ticks);
+int Yalnixfork(void);
+int YalnixBrk(void *addr);
 
 int SetKernelBrk(void *addr);
 
@@ -341,6 +346,7 @@ int SetKernelBrk(void *addr)
                     int tmp = PTR1[(*(unsigned long*)kernel_brk-VMEM_1_BASE)/PAGESIZE-1].pfn;
                     *(int *)(*(unsigned long*)kernel_brk - PAGESIZE) = -1;
                     PTR1[(*(unsigned long*)kernel_brk-VMEM_1_BASE)/PAGESIZE-1].pfn = nPF;
+                    WriteRegister(REG_TLB_FLUSH,*(unsigned long*)kernel_brk-PAGESIZE);
                     *(int *)(*(unsigned long*)kernel_brk - PAGESIZE) = tmp;
                     nPF = tmp;
                     numOfFPF++;
@@ -354,51 +360,31 @@ int SetKernelBrk(void *addr)
     return 0;
 }
 
-// need to modify
-int Brk(void *addr)
-{
-    // invalid address, return 0
-    // BTW , can it be less than MEM_INVALID_SIZE?
-    if (*(unsigned long*)addr < MEM_INVALID_SIZE || *(unsigned long*)addr > USER_STACK_LIMIT) return -1;
-    
-    int i;
-    if ( DOWN_TO_PAGE(*(unsigned long*)addr) >= *(unsigned long*)curPCB->brk) // need to allocate frame
-    {
-        for (i = 0; i < (DOWN_TO_PAGE(*(unsigned long*)addr) - *(unsigned long*)curPCB->brk); i++)
-        {
-            if (numOfFPF == 0) return -1;
-            
-            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].uprot = PROT_NONE;
-            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].kprot = (PROT_READ|PROT_WRITE|0);
-            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].valid = 1;
-            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].pfn = fPF;
-            fPF = *(int *)(*(unsigned long*)curPCB->brk);
-            numOfFPF--;
-            *(unsigned long*)curPCB->brk += PAGESIZE;
-        }
-    }
-    else
-    {
-        if ((*(unsigned long*)curPCB->brk - DOWN_TO_PAGE(*(unsigned long*)addr))/PAGESIZE >= 2)
-        {
-            for (i = 0; i < ( *(unsigned long*)curPCB->brk - DOWN_TO_PAGE(*(unsigned long*)addr))/PAGESIZE - 1; i++)
-            {
-                int tmp = curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE -1].pfn;
-                *(int *)(*(unsigned long*)curPCB->brk - PAGESIZE) = -1;
-                curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE-1].pfn = nPF;
-                *(int *)(*(unsigned long*)curPCB->brk - PAGESIZE) = tmp;
-                numOfFPF++;
-                curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE-1].valid = 0;
-                *(unsigned long*)curPCB->brk -= PAGESIZE;
-            }
-        }
-    }
-    return 0;
-}
-
 void TrapKernel(ExceptionStackFrame *frame)
 {
-
+    switch (frame->code)
+    {
+        case YALNIX_FORK: 
+        {
+            frame->regs[0] = Yalnixfork();
+            break;
+        }
+        case YALNIX_GETPID:
+        {
+            frame->regs[0] = YalnixGetPid();
+            break;
+        }
+        case YALNIX_BRK:
+        {
+            frame->regs[0] = YalnixBrk(frame->regs[1]);
+            break;
+        }
+        case YALNIX_DELAY:
+        {
+            frame->regs[0] = YalnixDelay(frame->regs[1]);
+            break;
+        }
+    }    
 }
 
 void TrapIllegal(ExceptionStackFrame *frame)
@@ -422,19 +408,43 @@ void TrapTTYTransmit(ExceptionStackFrame *frame)
 {
 }
 
-int GetPid(void)
+void TrapClock(ExceptionStackFrame *frame)
 {
-    // every process context switch with idle process, so just return idle pid?
+    // count down delay, if equals to zero, take this blocked process out from
+    // the block queue and put to ready queue
+    NodePtr *p;
+    p = delay_block_queue_head->next;
+    if (p != delay_block_queue_rear) ((*p).element)->delayTime--;
+    while (((*p).element) ->delayTime == 0 && p != delay_block_queue_rear)
+    {
+        delay_block_queue_head ->next = p->next;
+        p->next->pre = delay_block_queue_head;
+        
+        // add to ready queue
+        p->pre = ready_queue_rear->pre;
+        ready_queue_rear->pre->next = p;
+        p->next = ready_queue_rear;
+        ready_queue_rear->pre = p;
+        
+        p = delay_block_queue_head->next;
+    }
+}
+
+// internal trap handler for each yalnix kernel call
+int YalnixGetPid(void)
+{
     return curPCB ->pid;
 }
 
-int Delay(int clock_ticks)
+int YalnixDelay(int clock_ticks)
 {
     
     // add current process to block queue
     // context switch to the head of ready queue
     // if empty, switch to idle process
     
+    if (clock_ticks == 0) return 0;
+    if (clock_ticks < 0 ) return -1;
     // try to find the right place to place current process in block queue
     int tmp = 0;
     int flag = 0;
@@ -493,37 +503,17 @@ int Delay(int clock_ticks)
     }
     else
         ContextSwitch(KernalCopySwitch, curPCB ->ctx, curPCB, idle_pcb);
+    return 0;
 }
-                
-void TrapClock(ExceptionStackFrame *frame)
-{
-    // count down delay, if equals to zero, take this blocked process out from
-    // the block queue and put to ready queue
-    NodePtr *p;
-    p = delay_block_queue_head->next;
-    if (p != delay_block_queue_rear) ((*p).element)->delayTime--;
-    while (((*p).element) ->delayTime == 0 && p != delay_block_queue_rear)
-    {
-        delay_block_queue_head ->next = p->next;
-        p->next->pre = delay_block_queue_head;
-        
-        // add to ready queue
-        p->pre = ready_queue_rear->pre;
-        ready_queue_rear->pre->next = p;
-        p->next = ready_queue_rear;
-        ready_queue_rear->pre = p;
-        
-        p = delay_block_queue_head->next;
-    }
-}
+
  
-int fork(void)
+int Yalnixfork(void)
 {
     struct pcb *childPCB;
     childPCB= (struct pcb *)malloc(sizeof(struct pcb));
     
     struct pte childPT[PAGE_TABLE_LEN];
-    childPCB->peerProcess = NULL;
+    childPCB->siblingProcess = NULL;
     childPCB->childProcess = NULL;
     childPCB->pid = pid_count;
     pid_count++;
@@ -534,9 +524,9 @@ int fork(void)
 
     // try to make use of the red zone of curPCB to copy parent's kernelstack 
     // to child's pagetable
-    curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].uprot = PROT_NONE;
-    curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].kprot = (PROT_READ|PROT_WRITE|0);
-    curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].valid = 1;
+    PTR1[PAGE_TABLE_LEN-1].uprot = PROT_NONE;
+    PTR1[PAGE_TABLE_LEN-1].kprot = (PROT_READ|PROT_WRITE|0);
+    PTR1[PAGE_TABLE_LEN-1].valid = 1;
     
     int i;
     int tmp;
@@ -549,19 +539,20 @@ int fork(void)
         // frame
         if (numOfFPF == 0) return -1;
         tmp = fPF;
-        curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].pfn = tmp;
+        PTR1[PAGE_TABLE_LEN-1].pfn = tmp;
+        WriteRegister(REG_TLB_FLUSH,(2*PAGE_TABLE_LEN -1)*PAGESIZE);
         // move the head of free frame linked list to next frame
-        fPF = *(int *)(long)USER_STACK_LIMIT;
+        fPF = *(int *)(long)(2*PAGE_TABLE_LEN -1)*PAGESIZE;
         numOfFPF--;
         childPCB->PTR0[PAGE_TABLE_LEN-i].uprot = PROT_NONE;
         childPCB->PTR0[PAGE_TABLE_LEN-i].kprot = (PROT_READ|PROT_WRITE|0);
         childPCB->PTR0[PAGE_TABLE_LEN-i].valid = 1;
         childPCB->PTR0[PAGE_TABLE_LEN-i].pfn = tmp;
-        memcpy((void *)(unsigned long)(USER_STACK_LIMIT), (void *)(unsigned long)(KERNEL_STACK_LIMIT - i*PAGESIZE), PAGESIZE);
+        memcpy((void *)(unsigned long)((2*PAGE_TABLE_LEN -1)*PAGESIZE), (void *)(unsigned long)(KERNEL_STACK_LIMIT - i*PAGESIZE), PAGESIZE);
     }
 
     // try to copy parent's heap and stack to child
-    for (i = MEM_INVALID_SIZE/PAGESIZE; i < USER_STACK_LIMIT/PAGESIZE; i++)
+    for (i = MEM_INVALID_SIZE/PAGESIZE; i < /PAGESIZE; i++)
     {
         // copy parent's pte to child's page table
         childPCB->PTR0[i].uprot = curPCB->PTR0[i].uprot;
@@ -574,43 +565,95 @@ int fork(void)
         {
             if (numOfFPF == 0) return -1;
             tmp = fPF;
-            curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].pfn = tmp;
+            PTR1[PAGE_TABLE_LEN-1].pfn = tmp;
+            WriteRegister(REG_TLB_FLUSH,(2*PAGE_TABLE_LEN -1)*PAGESIZE);
             // move the head of free frame linked list to next frame
-            fPF = *(int *)(long)USER_STACK_LIMIT;
+            fPF = *(int *)(long)(2*PAGE_TABLE_LEN -1)*PAGESIZE;
             numOfFPF--;
             childPCB->PTR0[i].pfn = tmp;
-            memcpy((void *)(unsigned long)(USER_STACK_LIMIT), (void *)(unsigned long)(i*PAGESIZE), PAGESIZE);
+            memcpy((void *)(unsigned long)((2*PAGE_TABLE_LEN -1)*PAGESIZE), (void *)(unsigned long)(i*PAGESIZE), PAGESIZE);
         }
     }
 
     // set red zone back to usual
-    curPCB->PTR0[USER_STACK_LIMIT/PAGESIZE].valid = 0;
+    PTR1[PAGE_TABLE_LEN-1].valid = 0;
 
     // point curP as child's parent process
     childPCB->parentProcess = curPCB;
 
     // if parent process has no child process, point created process as 
     // parent's child process, if there is child processes, then 
-    // add created process to the end of the peer process
+    // add created process to the end of the sibling process
     if (curPCB->childProcess == NULL) curPCB->childProcess = childPCB;
     else 
     {
         struct pcb *tPCB;
         tPCB = curPCB->childProcess;
-        while (tPCB->peerProcess != NULL) tPCB = tPCB->peerProcess;
-        tPCB->peerProcess = childPCB;
+        while (tPCB->siblingProcess != NULL) tPCB = tPCB->siblingProcess;
+        tPCB->siblingProcess = childPCB;
     }
 
     // try to modify the return value of parent process and child process
     // parent: child pid, child: 0
     (curPCB->myFrame)->regs[0] = childPCB->pid;
     (childPCB->myFrame)->regs[0] = 0;
-
+    
+    // put parent process to the ready queue
+    NodePtr *tmpNode;
+    tmpNode = (NodePtr *)malloc(sizeof(Node));
+    (*tmpNode).element = curPCB;
+    
+    tmpNode->pre = ready_queue_rear->pre;
+    tmpNode->next = ready_queue_rear;
+    ready_queue_rear->pre->next = tmpNode;
+    ready_queue_rear->pre = tmpNode;
+    
     // child process return
     ContextSwitch(KernalCopySwitch,curPCB->ctx ,curPCB, childPCB);
     return (curPCB->myFrame)->regs[0];
 }
                   
-                  
+
+int YalnixBrk(void *addr)
+{
+    // invalid address, return 0
+    // BTW , can it be less than MEM_INVALID_SIZE?
+    if (*(unsigned long*)addr < MEM_INVALID_SIZE || *(unsigned long*)addr >= USER_STACK_LIMIT) return -1;
+    
+    int i;
+    if ( DOWN_TO_PAGE(*(unsigned long*)addr) >= *(unsigned long*)curPCB->brk) // need to allocate frame
+    {
+        for (i = 0; i < (DOWN_TO_PAGE(*(unsigned long*)addr) - *(unsigned long*)curPCB->brk); i++)
+        {
+            if (numOfFPF == 0) return -1;
+            
+            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].uprot = PROT_NONE;
+            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].kprot = (PROT_READ|PROT_WRITE|0);
+            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].valid = 1;
+            curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE].pfn = fPF;
+            fPF = *(int *)(*(unsigned long*)curPCB->brk);
+            numOfFPF--;
+            *(unsigned long*)curPCB->brk += PAGESIZE;
+        }
+    }
+    else
+    {
+        if ((*(unsigned long*)curPCB->brk - DOWN_TO_PAGE(*(unsigned long*)addr))/PAGESIZE >= 2)
+        {
+            for (i = 0; i < ( *(unsigned long*)curPCB->brk - DOWN_TO_PAGE(*(unsigned long*)addr))/PAGESIZE - 1; i++)
+            {
+                int tmp = curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE -1].pfn;
+                *(int *)(*(unsigned long*)curPCB->brk - PAGESIZE) = -1;
+                curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE-1].pfn = nPF;
+                WriteRegister(REG_TLB_FLUSH,*(unsigned long*)curPCB->brk - PAGESIZE);
+                *(int *)(*(unsigned long*)curPCB->brk - PAGESIZE) = tmp;
+                numOfFPF++;
+                curPCB->PTR0[(*(unsigned long*)curPCB->brk)/PAGESIZE-1].valid = 0;
+                *(unsigned long*)curPCB->brk -= PAGESIZE;
+            }
+        }
+    }
+    return 0;
+}
                   
                   
