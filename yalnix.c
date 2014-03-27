@@ -376,7 +376,7 @@ void TrapKernel(ExceptionStackFrame *frame)
         }
         case YALNIX_BRK:
         {
-            frame->regs[0] = YalnixBrk(frame->regs[1]);
+            frame->regs[0] = YalnixBrk((void *)frame->regs[1]);
             break;
         }
         case YALNIX_DELAY:
@@ -552,7 +552,7 @@ int Yalnixfork(void)
     }
 
     // try to copy parent's heap and stack to child
-    for (i = MEM_INVALID_SIZE/PAGESIZE; i < /PAGESIZE; i++)
+    for (i = MEM_INVALID_SIZE/PAGESIZE; i < USER_STACK_LIMIT/PAGESIZE; i++)
     {
         // copy parent's pte to child's page table
         childPCB->PTR0[i].uprot = curPCB->PTR0[i].uprot;
